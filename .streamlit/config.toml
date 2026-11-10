@@ -1,0 +1,15 @@
+# Force Streamlit into its LIGHT theme.
+# Without this, a PC in dark mode makes Streamlit render its own text
+# (headings, tab labels, input labels) in light colours — unreadable
+# against this app's white background.
+[theme]
+base = "light"
+primaryColor = "#4BA9FF"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F7F7FE"
+textColor = "#31343D"
+font = "sans serif"
+
+# Hide Streamlit's Deploy button and toolbar on the public app.
+[client]
+toolbarMode = "viewer"
