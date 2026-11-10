@@ -15,6 +15,7 @@ Metrics saved to outputs/metrics.json; test predictions to
 outputs/test_predictions.csv.
 """
 import json
+import os
 from pathlib import Path
 
 import joblib
@@ -42,6 +43,11 @@ def clip_iqr_bounds(X):
 
 
 def main():
+    # Create the output folders first: on a fresh checkout (e.g. Render)
+    # models/ and outputs/ do not exist yet (they are gitignored), and
+    # writing clip_bounds.json without them crashes the build.
+    os.makedirs(f"{BASE}/outputs", exist_ok=True)
+    os.makedirs(f"{BASE}/models", exist_ok=True)
     df = pd.read_csv(f"{BASE}/data/patna_aqi_dengue.csv", parse_dates=["date"])
     df = df.sort_values("date").reset_index(drop=True)
     split = int(len(df) * 0.8)
