@@ -133,8 +133,6 @@ weather rule — the model recovers that boundary almost exactly (2 missed
 HIGH days out of 87). That validates the pipeline; it is not a claim about
 predicting real case counts.
 
-## UI
-
 ## UI — theme modelled on aqi.in
 
 `app.py` (Streamlit) follows the aqi.in look: white background, dark text
@@ -155,6 +153,25 @@ plots), **Model results** (metrics + actual-vs-predicted chart). The app
 forces Streamlit's light theme (`.streamlit/config.toml`) so it stays
 readable even when the PC is in dark mode, and all secondary text uses dark
 slate #5A6B7B instead of pale grey for contrast on white.
+
+## Live data in the app
+
+The training CSV ends 30 Dec 2024, so the app does not use it as "today".
+On load it fetches the latest complete day from Open-Meteo (ERA5 weather +
+CAMS air quality, free, no key; cached for 1 hour) and uses those values as
+the sidebar defaults, aggregating hourly air quality to daily mean/max and
+computing AQI with the same CPCB formula as `src/build_dataset.py`. The page
+shows the input date and the forecast date next to the numbers (e.g.
+measurements of 11 Nov 2026 → forecast for 12 Nov 2026). When the fetch
+fails it falls back to the last training row (30 Dec 2024) and says so on
+the page instead of pretending the data is live.
+
+Live validation (12 Nov 2026): feeding the real 10 Nov 2026 measurements
+into the trained model predicted 190 for 11 Nov; the actual 11 Nov AQI from
+the same source was 208 (error −18, inside the test RMSE of 36). Note these
+are CAMS values — CPCB ground stations in Patna read higher (~350–400 on
+11 Nov), so the model is accurate against its own data source, not against
+ground stations.
 
 ## Files
 

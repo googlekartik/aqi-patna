@@ -7,10 +7,18 @@ a 6-segment AQI scale bar, and pollutant cards with a coloured left border.
 The AQI bands stay the Indian CPCB bands (the data's own standard); only
 their colours follow aqi.in's six-colour scale in order.
 
+Live data: on load the app fetches the latest complete day from Open-Meteo
+(ERA5 weather + CAMS air quality, free, no key) and uses it as the sidebar
+defaults, so the forecast is always for tomorrow from real latest data.
+When the fetch fails it falls back to the last training row (30 Dec 2024)
+and says so on the page.
+
 Run:  streamlit run app.py
 Then open the local URL it prints (default http://localhost:8501).
 """
 import json
+import urllib.request
+from datetime import date, timedelta
 from pathlib import Path
 
 import joblib
@@ -83,6 +91,86 @@ def aqi_category(aqi):
     return "Severe", "#C92033"
 
 
+# ---- Live data: latest complete day from Open-Meteo (free, no key) ----
+# The training CSV ends 30 Dec 2024, so without this the sidebar would
+# always show that old day as "today". The fetch runs at most once an hour
+# (st.cache_data) and falls back to the last training row when it fails.
+WEATHER_URL = (
+    "https://api.open-meteo.com/v1/forecast?latitude=25.5941&longitude=85.1376"
+    "&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,"
+    "relative_humidity_2m_mean,precipitation_sum,wind_speed_10m_max"
+    "&timezone=Asia%2FKolkata&past_days=7&forecast_days=0")
+AIRQ_URL = (
+    "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=25.5941&longitude=85.1376"
+    "&hourly=pm2_5,pm10,nitrogen_dioxide,ozone"
+    "&timezone=Asia%2FKolkata&past_days=7&forecast_days=0")
+
+
+def _get_json(url):
+    with urllib.request.urlopen(url, timeout=15) as r:
+        return json.load(r)
+
+
+@st.cache_data(ttl=3600)
+def fetch_latest_day():
+    """Latest complete day of Patna measurements from Open-Meteo.
+
+    Returns (values dict with the 14 FEATURES, input date) or None when the
+    fetch fails for any reason. Aggregation and the AQI formula match
+    src/build_dataset.py exactly, so a fetched row is directly comparable
+    with the training data.
+    """
+    try:
+        w = _get_json(WEATHER_URL)["daily"]
+        a = _get_json(AIRQ_URL)["hourly"]
+    except Exception:
+        return None
+    try:
+        weather = pd.DataFrame({
+            "date": pd.to_datetime(w["time"]),
+            "temp_max": w["temperature_2m_max"],
+            "temp_min": w["temperature_2m_min"],
+            "temp_mean": w["temperature_2m_mean"],
+            "humidity_mean": w["relative_humidity_2m_mean"],
+            "precipitation_sum": w["precipitation_sum"],
+            "wind_speed_max": w["wind_speed_10m_max"],
+        })
+        airq = pd.DataFrame({
+            "datetime": pd.to_datetime(a["time"]),
+            "pm2_5": a["pm2_5"], "pm10": a["pm10"],
+            "no2": a["nitrogen_dioxide"], "o3": a["ozone"],
+        })
+        airq["date"] = airq["datetime"].dt.date
+        daily_air = airq.groupby("date").agg(
+            pm2_5_mean=("pm2_5", "mean"), pm2_5_max=("pm2_5", "max"),
+            pm10_mean=("pm10", "mean"), pm10_max=("pm10", "max"),
+            no2_mean=("no2", "mean"), o3_mean=("o3", "mean")).reset_index()
+        daily_air["date"] = pd.to_datetime(daily_air["date"])
+        merged = weather.merge(daily_air, on="date", how="inner")
+        merged = merged.dropna(subset=["pm2_5_mean", "pm10_mean"])
+        if merged.empty:
+            return None
+        row = merged.iloc[-1]
+        values = {
+            "temp_max": float(row["temp_max"]), "temp_min": float(row["temp_min"]),
+            "temp_mean": float(row["temp_mean"]),
+            "humidity_mean": float(row["humidity_mean"]),
+            "precipitation_sum": float(row["precipitation_sum"]),
+            "wind_speed_max": float(row["wind_speed_max"]),
+            "pm2_5_mean": float(row["pm2_5_mean"]),
+            "pm2_5_max": float(row["pm2_5_max"]),
+            "pm10_mean": float(row["pm10_mean"]),
+            "pm10_max": float(row["pm10_max"]),
+            "no2_mean": float(row["no2_mean"]), "o3_mean": float(row["o3_mean"]),
+            "aqi": max(sub_index(row["pm2_5_mean"], PM25_BP),
+                       sub_index(row["pm10_mean"], PM10_BP)),
+            "rain_7d": float(merged["precipitation_sum"].sum()),
+        }
+        return values, row["date"].date()
+    except Exception:
+        return None
+
+
 def risk_level(score):
     return "High" if score >= 60 else ("Moderate" if score >= 35 else "Low")
 
@@ -144,10 +232,22 @@ st.markdown(
 df, metrics, eda, areas, bounds = load_data()
 reg, clf = load_models()
 
-# ---- Sidebar: today's measurements (shared by both predictions) ----
-st.sidebar.markdown("### Today's measurements")
-st.sidebar.write("Enter today's values for Patna. Both predictions update live.")
-defaults = df.iloc[-1]
+# ---- Sidebar: measurements for the latest day (shared by both predictions) ----
+live = fetch_latest_day()
+if live is not None:
+    defaults, input_date = live[0], live[1]
+    live_note = f"Live data from Open-Meteo for {input_date:%d %b %Y}."
+    is_live = True
+else:
+    defaults = df.iloc[-1]
+    input_date = df["date"].max().date()
+    live_note = (f"Live data unavailable — showing {input_date:%d %b %Y} "
+                 "(last training day).")
+    is_live = False
+forecast_date = input_date + timedelta(days=1)
+
+st.sidebar.markdown("### Measurements")
+st.sidebar.write(live_note + " Both predictions update live — edit any value below.")
 medians = df[FEATURES].median()
 values = {}
 for feat in FEATURES:
@@ -176,7 +276,8 @@ with tab_predict:
         f'letter-spacing:1.5px;">TOMORROW&#8217;S AQI FORECAST</div>'
         f'<div style="color:{cat_color};font-size:96px;font-weight:800;line-height:1;">'
         f'{aqi_next:.0f}</div>'
-        f'<div style="color:{DARK};font-size:15px;font-weight:600;">AQI &middot; Patna, Bihar, India</div>'
+        f'<div style="color:{DARK};font-size:15px;font-weight:600;">AQI &middot; Forecast for '
+        f'{forecast_date:%d %b %Y} &middot; Patna, Bihar, India</div>'
         f'<div style="margin-top:10px;color:{DARK};font-size:16px;">Air Quality is '
         f'<span style="background:{cat_color}22;color:{cat_color};border-radius:20px;'
         f'padding:3px 14px;font-weight:700;">{cat}</span></div>'
@@ -185,11 +286,12 @@ with tab_predict:
         f'PM2.5: <b>{values["pm2_5_mean"]:.0f} µg/m³</b> &nbsp;&middot;&nbsp; '
         f'PM10: <b>{values["pm10_mean"]:.0f} µg/m³</b></div>'
         f'<div style="color:{GREY};font-size:12px;margin-top:4px;">'
-        f'Forecast from today&#8217;s measurements &middot; training data through {last_data_date}</div>')
+        f'Forecast from measurements of {input_date:%d %b %Y} &middot; '
+        f'{"live data: Open-Meteo (CAMS)" if is_live else f"training data through {last_data_date} (live data unavailable)"}</div>')
     hero_right = (
         f'<div style="background:white;border:1px solid {BORDER};border-radius:20px;'
         f'padding:20px 22px;box-shadow:0 4px 18px rgba(49,52,61,0.06);">'
-        f'<div style="color:{DARK};font-size:15px;font-weight:700;">Today&#8217;s weather in Patna</div>'
+        f'<div style="color:{DARK};font-size:15px;font-weight:700;">Weather in Patna on {input_date:%d %b}</div>'
         f'<div style="color:{DARK};font-size:40px;font-weight:800;">{values["temp_mean"]:.0f}°C</div>'
         f'<div style="color:{GREY};font-size:14px;">Humidity {values["humidity_mean"]:.0f}% &middot; '
         f'Wind {values["wind_speed_max"]:.0f} km/h<br>'
@@ -262,7 +364,7 @@ with tab_predict:
         f"""<div style="background:white;border:1px solid {BORDER};border-left:5px solid {risk_color};
         border-radius:16px;padding:18px 22px;box-shadow:0 4px 18px rgba(49,52,61,0.05);">
         <div style="color:{GREY};font-size:12px;font-weight:700;letter-spacing:1px;">
-        DENGUE OUTBREAK RISK &middot; TOMORROW</div>
+        DENGUE OUTBREAK RISK &middot; {forecast_date:%d %b %Y}</div>
         <div style="color:{DARK};font-size:28px;font-weight:800;">{risk}
         <span style="font-size:15px;font-weight:600;color:{GREY};"> &nbsp;({prob:.0%} probability of HIGH)</span></div>
         <div style="color:{GREY};font-size:14px;">Warm, humid days after rain favour Aedes mosquitoes.
@@ -289,11 +391,11 @@ with tab_areas:
     st.markdown("## Dengue-prone areas in Patna")
     st.write("Each locality gets a **base score (0–100)** from real, verifiable "
              "factors — elevation, distance to the Ganga, and whether the area "
-             "is known for monsoon waterlogging. Today's weather then moves the "
+             "is known for monsoon waterlogging. The latest day's weather then moves the "
              "score up or down:")
     st.code("final score = 0.6 × base score + 0.4 × (today's HIGH-risk probability × 100)",
             language="text")
-    st.write(f"Today's weather-based HIGH-risk probability is **{prob:.0%}**, "
+    st.write(f"The HIGH-risk probability from the {input_date:%d %b %Y} measurements is **{prob:.0%}**, "
              f"so areas are ranked by their final score below.")
     areas = areas.copy()
     areas["final_score"] = (0.6 * areas["base_score"] + 0.4 * prob * 100).round(1)
